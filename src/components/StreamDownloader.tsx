@@ -14,7 +14,6 @@ import {
   ThumbsUp,
   User,
   ExternalLink,
-  ChevronRight,
   Layers,
   FileText,
   Copy,
@@ -29,13 +28,6 @@ interface StreamDownloaderProps {
   initialUrl?: string;
   onNavigateToTerabox?: (url: string) => void;
 }
-
-const SAMPLE_URLS = [
-  { label: 'YouTube Music', url: 'https://www.youtube.com/watch?v=5XiBag95uiI', platform: 'youtube' as PlatformType },
-  { label: 'XNXX Video', url: 'https://www.xnxx.com/video-xivgl58/thick_stepsister_ass_was_too_much_so_i_banged_her', platform: 'xnxx' as PlatformType },
-  { label: 'Xvideos Video', url: 'https://www.xvideos.com/video.kfoudiff3bb/_', platform: 'xvideos' as PlatformType },
-  { label: 'Facebook Reel', url: 'https://www.facebook.com/reel/123456789', platform: 'facebook' as PlatformType },
-];
 
 export const StreamDownloader: React.FC<StreamDownloaderProps> = ({
   initialUrl = '',
@@ -228,26 +220,6 @@ export const StreamDownloader: React.FC<StreamDownloaderProps> = ({
               <Radio className="w-3.5 h-3.5 text-purple-400" />
               <span>Extract MP3 Audio Only</span>
             </label>
-          </div>
-
-          {/* Sample URLs Strip for quick testing */}
-          <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-neutral-800/60 text-xs">
-            <span className="text-neutral-500">Quick Test URLs:</span>
-            {SAMPLE_URLS.map(sample => (
-              <button
-                key={sample.label}
-                type="button"
-                onClick={() => {
-                  setUrl(sample.url);
-                  setSelectedPlatform(sample.platform);
-                  handleExtract(sample.url, sample.platform);
-                }}
-                className="px-2.5 py-1 rounded bg-neutral-800 text-neutral-300 hover:text-white hover:bg-neutral-700 border border-neutral-700/60 transition-colors flex items-center gap-1"
-              >
-                <span>{sample.label}</span>
-                <ChevronRight className="w-3 h-3 text-neutral-500" />
-              </button>
-            ))}
           </div>
         </div>
       </div>

@@ -6,6 +6,23 @@ import dotenv from 'dotenv';
 import crypto from 'crypto';
 import { detectPlatform, normalizeMediaResponse, formatBytes } from './src/utils/mediaParser';
 import { LogEntry, AdminStats, EndpointHealth, SystemConfig } from './src/types';
+import {
+  initDatabase,
+  getSystemConfigSql,
+  updateSystemConfigSql,
+  getAdminPasswordSql,
+  setAdminPasswordSql,
+  recordLogSql,
+  queryLogsSql,
+  deleteLogSql,
+  clearLogsSql,
+  getAdminStatsSql,
+  resetStatsSql,
+  saveMediaHistorySql,
+  getRecentMediaHistorySql,
+  getDatabaseDiagnostics,
+  getDatabasePath,
+} from './src/db/sqlite';
 
 dotenv.config();
 
@@ -13,7 +30,8 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = Number(process.env.PORT) || 3000;
+const HOST = process.env.HOST || '0.0.0.0';
 let currentAdminPassword = process.env.ADMIN_PASSWORD || 'admin_stream_pass_2026';
 let currentBaseUrl = (process.env.PREXZY_API_BASE_URL || 'https://prexzyapis.com').replace(/\/+$/, '');
 
@@ -135,6 +153,11 @@ function recordLog(entry: Omit<LogEntry, 'id' | 'timestamp'>) {
     auditLogs.pop();
   }
 
+  // Persist asynchronously to SQLite
+  recordLogSql(entry).catch(err => {
+    console.warn('[SQLite log notice]', err?.message);
+  });
+
   // Update Stats
   stats.totalRequests++;
   if (entry.status >= 200 && entry.status < 400) {
@@ -163,7 +186,7 @@ function recordLog(entry: Omit<LogEntry, 'id' | 'timestamp'>) {
 recordLog({
   platform: 'system',
   action: 'admin',
-  input: 'OmniStream media gateway initialized on port 3000',
+  input: `OmniStream media gateway initialized on port ${PORT} with SQLite database`,
   status: 200,
   latencyMs: 12,
   clientIp: '127.0.0.1',
@@ -184,6 +207,24 @@ function requireAdmin(req: Request, res: Response, next: NextFunction): void {
 /* ==========================================================================
    PUBLIC API ENDPOINTS
    ========================================================================== */
+
+// 0. Render Health Check Endpoint (Returns 200 for Render port scanning & health checks)
+app.get(['/health', '/api/health'], (_req: Request, res: Response): void => {
+  res.status(200).json({
+    status: 'ok',
+    service: 'OmniStream Media Gateway',
+    database: 'SQLite (@libsql/client)',
+    uptimeSeconds: Math.floor(process.uptime()),
+    timestamp: new Date().toISOString(),
+  });
+});
+
+// 0.1 Persistent Media Extraction History
+app.get(['/api/media-history', '/media-history'], async (req: Request, res: Response): Promise<void> => {
+  const limit = Math.min(parseInt(req.query.limit as string, 10) || 20, 50);
+  const history = await getRecentMediaHistorySql(limit);
+  res.json({ success: true, history });
+});
 
 // 1. Get Announcement Banner
 app.get(['/api/announcement', '/announcement'], (_req, res) => {
@@ -296,6 +337,7 @@ app.post(['/api/extract', '/extract'], async (req: Request, res: Response): Prom
               clientIp,
               userAgent,
             });
+            saveMediaHistorySql(normalized).catch(() => {});
             res.json({ success: true, platform: 'aio', data: normalized, fallbackApplied: true });
             return;
           }
@@ -312,6 +354,7 @@ app.post(['/api/extract', '/extract'], async (req: Request, res: Response): Prom
     }
 
     const normalized = normalizeMediaResponse(platform, responseJson, cleanUrl);
+    saveMediaHistorySql(normalized).catch(() => {});
 
     recordLog({
       platform,
@@ -687,34 +730,68 @@ app.post('/api/admin/login', (req: Request, res: Response): void => {
 });
 
 // 2. Admin Telemetry Stats & System Diagnostics
-app.get('/api/admin/stats', requireAdmin, (_req: Request, res: Response): void => {
+app.get('/api/admin/stats', requireAdmin, async (_req: Request, res: Response): Promise<void> => {
   const uptimeSec = Math.floor(process.uptime());
   const mem = process.memoryUsage();
 
-  res.json({
-    success: true,
-    stats: {
-      ...stats,
-      uptimeSeconds: uptimeSec,
-      memoryUsageMB: Math.round(mem.rss / 1024 / 1024),
-      diagnostics: {
+  try {
+    const dbDiag = await getDatabaseDiagnostics();
+    const sqlStats = await getAdminStatsSql();
+
+    res.json({
+      success: true,
+      stats: {
+        ...stats,
+        totalRequests: Math.max(stats.totalRequests, sqlStats.totalRequests),
+        successfulRequests: Math.max(stats.successfulRequests, sqlStats.successfulRequests),
+        failedRequests: Math.max(stats.failedRequests, sqlStats.failedRequests),
+        totalStreams: Math.max(stats.totalStreams, sqlStats.totalStreams),
+        totalDownloads: Math.max(stats.totalDownloads, sqlStats.totalDownloads),
+        averageLatencyMs: sqlStats.averageLatencyMs || stats.averageLatencyMs,
         uptimeSeconds: uptimeSec,
-        uptimeFormatted: formatUptime(uptimeSec),
         memoryUsageMB: Math.round(mem.rss / 1024 / 1024),
-        heapUsedMB: Math.round(mem.heapUsed / 1024 / 1024),
-        heapTotalMB: Math.round(mem.heapTotal / 1024 / 1024),
-        nodeVersion: process.version,
-        platform: process.platform,
-        arch: process.arch,
-        activeSessions: adminSessions.size,
-        cachedLogsCount: auditLogs.length,
+        diagnostics: {
+          uptimeSeconds: uptimeSec,
+          uptimeFormatted: formatUptime(uptimeSec),
+          memoryUsageMB: Math.round(mem.rss / 1024 / 1024),
+          heapUsedMB: Math.round(mem.heapUsed / 1024 / 1024),
+          heapTotalMB: Math.round(mem.heapTotal / 1024 / 1024),
+          nodeVersion: process.version,
+          platform: process.platform,
+          arch: process.arch,
+          activeSessions: adminSessions.size,
+          cachedLogsCount: Math.max(auditLogs.length, dbDiag.totalLogs),
+          database: dbDiag,
+        },
       },
-    },
-  });
+    });
+  } catch (_err) {
+    res.json({
+      success: true,
+      stats: {
+        ...stats,
+        uptimeSeconds: uptimeSec,
+        memoryUsageMB: Math.round(mem.rss / 1024 / 1024),
+        diagnostics: {
+          uptimeSeconds: uptimeSec,
+          uptimeFormatted: formatUptime(uptimeSec),
+          memoryUsageMB: Math.round(mem.rss / 1024 / 1024),
+          heapUsedMB: Math.round(mem.heapUsed / 1024 / 1024),
+          heapTotalMB: Math.round(mem.heapTotal / 1024 / 1024),
+          nodeVersion: process.version,
+          platform: process.platform,
+          arch: process.arch,
+          activeSessions: adminSessions.size,
+          cachedLogsCount: auditLogs.length,
+        },
+      },
+    });
+  }
 });
 
 // 2.1 Admin Reset Stats
-app.post('/api/admin/reset-stats', requireAdmin, (_req: Request, res: Response): void => {
+app.post('/api/admin/reset-stats', requireAdmin, async (_req: Request, res: Response): Promise<void> => {
+  await resetStatsSql().catch(() => {});
   stats.totalRequests = 0;
   stats.successfulRequests = 0;
   stats.failedRequests = 0;
@@ -741,8 +818,36 @@ app.post('/api/admin/reset-stats', requireAdmin, (_req: Request, res: Response):
   res.json({ success: true, message: 'Telemetry counters reset successfully' });
 });
 
-// 2.2 Admin Change Password
-app.post('/api/admin/change-password', requireAdmin, (req: Request, res: Response): void => {
+// 2.2 Download SQLite Database Backup (.db file)
+app.get('/api/admin/database/download', requireAdmin, (req: Request, res: Response): void => {
+  const dbPath = getDatabasePath();
+
+  if (!fs.existsSync(dbPath)) {
+    res.status(404).json({ error: 'Database file not found on disk yet' });
+    return;
+  }
+
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const filename = `omnistream_backup_${timestamp}.db`;
+
+  recordLog({
+    platform: 'system',
+    action: 'admin',
+    input: `Administrator downloaded SQLite database backup (${filename})`,
+    status: 200,
+    latencyMs: 1,
+    clientIp: (req.headers['x-forwarded-for'] as string) || req.socket.remoteAddress || '127.0.0.1',
+  });
+
+  res.download(dbPath, filename, (err) => {
+    if (err && !res.headersSent) {
+      res.status(500).json({ error: 'Failed to download SQLite database file' });
+    }
+  });
+});
+
+// 2.3 Admin Change Password
+app.post('/api/admin/change-password', requireAdmin, async (req: Request, res: Response): Promise<void> => {
   const { currentPassword, newPassword } = req.body;
   if (!currentPassword || currentPassword !== currentAdminPassword) {
     res.status(400).json({ error: 'Current password does not match' });
@@ -754,21 +859,46 @@ app.post('/api/admin/change-password', requireAdmin, (req: Request, res: Respons
   }
 
   currentAdminPassword = newPassword.trim();
+  await setAdminPasswordSql(currentAdminPassword).catch(() => {});
+
   recordLog({
     platform: 'system',
     action: 'admin',
-    input: 'Admin dashboard password changed successfully',
+    input: 'Admin dashboard password changed and saved to SQLite database',
     status: 200,
     latencyMs: 2,
   });
 
-  res.json({ success: true, message: 'Admin password updated successfully' });
+  res.json({ success: true, message: 'Admin password updated successfully in SQLite database' });
 });
 
 // 3. Admin Detailed Request Logs
-app.get('/api/admin/logs', requireAdmin, (req: Request, res: Response): void => {
+app.get('/api/admin/logs', requireAdmin, async (req: Request, res: Response): Promise<void> => {
   const { platform, action, status, q, limit = '200' } = req.query;
+  const maxItems = Math.min(parseInt(limit as string, 10) || 200, 1000);
 
+  try {
+    const sqlData = await queryLogsSql({
+      platform: platform as string,
+      action: action as string,
+      status: status as string,
+      q: q as string,
+      limit: maxItems,
+    });
+
+    if (sqlData.logs.length > 0) {
+      res.json({
+        success: true,
+        total: sqlData.total,
+        logs: sqlData.logs,
+      });
+      return;
+    }
+  } catch (err) {
+    console.warn('[SQLite logs query fallback]:', err);
+  }
+
+  // In-memory fallback
   let filtered = [...auditLogs];
 
   if (platform && platform !== 'all') {
@@ -790,7 +920,6 @@ app.get('/api/admin/logs', requireAdmin, (req: Request, res: Response): void => 
     );
   }
 
-  const maxItems = Math.min(parseInt(limit as string, 10) || 200, 1000);
   res.json({
     success: true,
     total: filtered.length,
@@ -799,28 +928,28 @@ app.get('/api/admin/logs', requireAdmin, (req: Request, res: Response): void => 
 });
 
 // 3.1 Admin Delete Single Log
-app.delete('/api/admin/logs/:id', requireAdmin, (req: Request, res: Response): void => {
+app.delete('/api/admin/logs/:id', requireAdmin, async (req: Request, res: Response): Promise<void> => {
   const logId = req.params.id;
+  await deleteLogSql(logId).catch(() => {});
   const index = auditLogs.findIndex(l => l.id === logId);
   if (index !== -1) {
     auditLogs.splice(index, 1);
-    res.json({ success: true, message: `Log ${logId} deleted` });
-  } else {
-    res.status(404).json({ error: 'Log entry not found' });
   }
+  res.json({ success: true, message: `Log ${logId} deleted` });
 });
 
 // 4. Admin Clear All Logs
-app.delete('/api/admin/logs', requireAdmin, (_req: Request, res: Response): void => {
+app.delete('/api/admin/logs', requireAdmin, async (_req: Request, res: Response): Promise<void> => {
+  await clearLogsSql().catch(() => {});
   auditLogs.length = 0;
   recordLog({
     platform: 'system',
     action: 'admin',
-    input: 'Audit logs cleared by administrator',
+    input: 'Audit logs cleared by administrator from SQLite',
     status: 200,
     latencyMs: 1,
   });
-  res.json({ success: true, message: 'Logs cleared successfully' });
+  res.json({ success: true, message: 'Logs cleared successfully from SQLite database' });
 });
 
 // 5. Admin API Health Tester for all 16 Prexzy Endpoints
@@ -956,7 +1085,12 @@ app.post('/api/admin/test-endpoint', requireAdmin, async (req: Request, res: Res
 });
 
 // 6. Admin System Configuration
-app.get('/api/admin/config', requireAdmin, (_req: Request, res: Response): void => {
+app.get('/api/admin/config', requireAdmin, async (_req: Request, res: Response): Promise<void> => {
+  try {
+    const savedConfig = await getSystemConfigSql();
+    Object.assign(systemConfig, savedConfig);
+  } catch {}
+
   res.json({
     success: true,
     config: systemConfig,
@@ -964,7 +1098,7 @@ app.get('/api/admin/config', requireAdmin, (_req: Request, res: Response): void 
   });
 });
 
-app.post('/api/admin/config', requireAdmin, (req: Request, res: Response): void => {
+app.post('/api/admin/config', requireAdmin, async (req: Request, res: Response): Promise<void> => {
   const { baseUrl, announcement, announcementActive, rateLimitEnabled, rateLimitRpm, maintenanceMode } = req.body;
 
   if (baseUrl && typeof baseUrl === 'string') {
@@ -986,10 +1120,15 @@ app.post('/api/admin/config', requireAdmin, (req: Request, res: Response): void 
     systemConfig.maintenanceMode = maintenanceMode;
   }
 
+  // Persist to SQLite
+  await updateSystemConfigSql(systemConfig).catch(err => {
+    console.warn('[SQLite config update notice]:', err?.message);
+  });
+
   recordLog({
     platform: 'system',
     action: 'admin',
-    input: `System configuration updated: BaseURL=${systemConfig.baseUrl}, Maintenance=${systemConfig.maintenanceMode}, RPM=${systemConfig.rateLimitRpm}`,
+    input: `System configuration updated & saved to SQLite: BaseURL=${systemConfig.baseUrl}, Maintenance=${systemConfig.maintenanceMode}, RPM=${systemConfig.rateLimitRpm}`,
     status: 200,
     latencyMs: 2,
   });
@@ -1002,6 +1141,17 @@ app.post('/api/admin/config', requireAdmin, (req: Request, res: Response): void 
    ========================================================================== */
 
 async function startServer() {
+  // Initialize SQLite database
+  try {
+    await initDatabase();
+    const savedConfig = await getSystemConfigSql();
+    Object.assign(systemConfig, savedConfig);
+    currentAdminPassword = await getAdminPasswordSql();
+    console.log(`[OmniStream] SQLite initialized at: ${getDatabasePath()}`);
+  } catch (dbErr) {
+    console.warn('[OmniStream] SQLite initialization notice:', dbErr);
+  }
+
   const isProduction = process.env.NODE_ENV === 'production' || process.env.VERCEL === '1';
   const distPath = path.resolve(__dirname, 'dist');
 
@@ -1014,7 +1164,7 @@ async function startServer() {
     });
     app.use(vite.middlewares);
   } else if (fs.existsSync(distPath)) {
-    // Production mode with built assets
+    // Production mode with built assets (Render / Node production)
     app.use(express.static(distPath));
     app.get('*', (_req, res) => {
       res.sendFile(path.resolve(distPath, 'index.html'));
@@ -1022,8 +1172,9 @@ async function startServer() {
   }
 
   if (process.env.VERCEL !== '1') {
-    app.listen(PORT, () => {
-      console.log(`> OmniStream Server running at http://localhost:${PORT}`);
+    app.listen(PORT, HOST, () => {
+      console.log(`> OmniStream Server running at http://${HOST}:${PORT}`);
+      console.log(`> SQLite Database: ${getDatabasePath()}`);
       console.log(`> Upstream Base URL: ${systemConfig.baseUrl}`);
       console.log(`> Admin Password Configured: [${currentAdminPassword ? 'YES' : 'DEFAULT'}]`);
     });

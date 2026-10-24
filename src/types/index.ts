@@ -96,6 +96,15 @@ export interface LogEntry {
   payloadSummary?: string;
 }
 
+export interface DatabaseDiagnostics {
+  connected: boolean;
+  type: string;
+  path: string;
+  fileSizeBytes: number;
+  totalLogs: number;
+  totalMediaHistory: number;
+}
+
 export interface ServerDiagnostics {
   uptimeSeconds: number;
   uptimeFormatted: string;
@@ -107,6 +116,7 @@ export interface ServerDiagnostics {
   arch: string;
   activeSessions: number;
   cachedLogsCount: number;
+  database?: DatabaseDiagnostics;
 }
 
 export interface AdminStats {

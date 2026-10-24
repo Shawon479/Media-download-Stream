@@ -162,6 +162,9 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLoginStateChange }) =>
 
   // Loading states & Messages
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [isDownloadingDb, setIsDownloadingDb] = useState(false);
+  const [dbDownloadError, setDbDownloadError] = useState<string | null>(null);
+  const [dbDownloadSuccess, setDbDownloadSuccess] = useState<string | null>(null);
   const [configMessage, setConfigMessage] = useState<string | null>(null);
   const [passwordMessage, setPasswordMessage] = useState<string | null>(null);
   const [passwordError, setPasswordError] = useState<string | null>(null);
@@ -328,6 +331,40 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLoginStateChange }) =>
       }
     } catch (err) {
       console.warn('Reset stats error:', err);
+    }
+  };
+
+  const handleDownloadDatabase = async () => {
+    if (!token) return;
+    setIsDownloadingDb(true);
+    setDbDownloadError(null);
+    setDbDownloadSuccess(null);
+    try {
+      const res = await fetch('/api/admin/database/download', {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.status === 401) return handleUnauthorized();
+      if (!res.ok) {
+        const errJson = await res.json().catch(() => null);
+        throw new Error(errJson?.error || `Download failed with HTTP ${res.status}`);
+      }
+
+      const blob = await res.blob();
+      const downloadUrl = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = downloadUrl;
+      const dateStr = new Date().toISOString().slice(0, 10);
+      link.download = `omnistream_backup_${dateStr}.db`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => window.URL.revokeObjectURL(downloadUrl), 5000);
+      setDbDownloadSuccess(`Database downloaded (${(blob.size / 1024).toFixed(1)} KB)`);
+      setTimeout(() => setDbDownloadSuccess(null), 4000);
+    } catch (err: any) {
+      setDbDownloadError(err.message || 'Failed to download database');
+    } finally {
+      setIsDownloadingDb(false);
     }
   };
 
@@ -768,22 +805,57 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLoginStateChange }) =>
             </div>
           </div>
 
+          {/* Download DB feedback alerts */}
+          {dbDownloadSuccess && (
+            <div className="p-3 rounded-xl bg-emerald-950/60 border border-emerald-800 text-emerald-300 text-xs flex items-center justify-between animate-fadeIn">
+              <div className="flex items-center gap-2">
+                <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                <span>{dbDownloadSuccess}</span>
+              </div>
+              <button onClick={() => setDbDownloadSuccess(null)} className="text-emerald-400 hover:text-white text-xs">✕</button>
+            </div>
+          )}
+          {dbDownloadError && (
+            <div className="p-3 rounded-xl bg-rose-950/60 border border-rose-800 text-rose-300 text-xs flex items-center justify-between animate-fadeIn">
+              <div className="flex items-center gap-2">
+                <XCircle className="w-4 h-4 text-rose-400 shrink-0" />
+                <span>{dbDownloadError}</span>
+              </div>
+              <button onClick={() => setDbDownloadError(null)} className="text-rose-400 hover:text-white text-xs">✕</button>
+            </div>
+          )}
+
           {/* Node.js Process & Host Diagnostics */}
           {stats.diagnostics && (
             <div className="p-5 bg-neutral-900/40 border border-neutral-800 rounded-xl space-y-3">
-              <div className="flex items-center justify-between">
+              <div className="flex flex-wrap items-center justify-between gap-2">
                 <div className="flex items-center gap-2">
                   <Server className="w-4 h-4 text-emerald-400" />
                   <h2 className="text-sm font-semibold text-white">Live Node.js Runtime & Memory Telemetry</h2>
                 </div>
-                <button
-                  onClick={handleResetStats}
-                  className="px-2.5 py-1 text-xs rounded-lg bg-neutral-800 hover:bg-neutral-700 text-neutral-300 border border-neutral-700 transition-colors flex items-center gap-1"
-                  title="Reset counter metrics to 0"
-                >
-                  <RotateCcw className="w-3 h-3 text-amber-400" />
-                  <span>Reset Counters</span>
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={handleDownloadDatabase}
+                    disabled={isDownloadingDb}
+                    className="px-2.5 py-1 text-xs rounded-lg bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/30 transition-colors flex items-center gap-1.5 font-medium shadow-sm disabled:opacity-50"
+                    title="Download raw SQLite database file (omnistream.db)"
+                  >
+                    {isDownloadingDb ? (
+                      <div className="w-3 h-3 border-2 border-emerald-300 border-t-transparent rounded-full animate-spin" />
+                    ) : (
+                      <Download className="w-3.5 h-3.5 text-emerald-400" />
+                    )}
+                    <span>{isDownloadingDb ? 'Downloading...' : 'Download DB (.db)'}</span>
+                  </button>
+                  <button
+                    onClick={handleResetStats}
+                    className="px-2.5 py-1 text-xs rounded-lg bg-neutral-800 hover:bg-neutral-700 text-neutral-300 border border-neutral-700 transition-colors flex items-center gap-1"
+                    title="Reset counter metrics to 0"
+                  >
+                    <RotateCcw className="w-3 h-3 text-amber-400" />
+                    <span>Reset Counters</span>
+                  </button>
+                </div>
               </div>
 
               <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-3 text-xs">
@@ -818,12 +890,47 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLoginStateChange }) =>
                   </span>
                 </div>
                 <div className="p-3 bg-neutral-950 border border-neutral-800/80 rounded-lg">
-                  <span className="text-neutral-500 block text-[11px]">Cached Audit Logs</span>
+                  <span className="text-neutral-500 block text-[11px]">Audit Logs (SQLite)</span>
                   <span className="text-sm font-bold font-mono text-purple-400">
                     {stats.diagnostics.cachedLogsCount}
                   </span>
                 </div>
               </div>
+
+              {/* SQLite Database Telemetry */}
+              {stats.diagnostics.database && (
+                <div className="pt-2.5 border-t border-neutral-800/80 flex flex-wrap items-center justify-between gap-3 text-xs">
+                  <div className="flex items-center gap-2">
+                    <HardDrive className="w-4 h-4 text-emerald-400" />
+                    <span className="font-semibold text-neutral-300">SQLite Database:</span>
+                    <span className="px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-mono text-[11px] flex items-center gap-1">
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                      {stats.diagnostics.database.type} (Active)
+                    </span>
+                    <span className="text-neutral-500 font-mono text-[11px] truncate max-w-[200px] sm:max-w-none" title={stats.diagnostics.database.path}>
+                      {stats.diagnostics.database.path}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-3 sm:gap-4 text-neutral-400 font-mono text-[11px]">
+                    <span>Disk: <strong className="text-white">{(stats.diagnostics.database.fileSizeBytes / 1024).toFixed(1)} KB</strong></span>
+                    <span>Stored Logs: <strong className="text-white">{stats.diagnostics.database.totalLogs}</strong></span>
+                    <span>Media History: <strong className="text-white">{stats.diagnostics.database.totalMediaHistory}</strong></span>
+                    <button
+                      onClick={handleDownloadDatabase}
+                      disabled={isDownloadingDb}
+                      className="px-2.5 py-0.5 rounded bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-neutral-950 font-bold text-[11px] font-sans flex items-center gap-1 transition-colors shadow-sm ml-1"
+                      title="Download omnistream.db file directly"
+                    >
+                      {isDownloadingDb ? (
+                        <div className="w-3 h-3 border-2 border-neutral-950 border-t-transparent rounded-full animate-spin" />
+                      ) : (
+                        <Download className="w-3 h-3" />
+                      )}
+                      <span>Download .db</span>
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
